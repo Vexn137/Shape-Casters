@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Shape Caster</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; height: 100%; overflow: hidden;
+    background: black;
+  }
+  #gameCanvas, #resultCanvas, #drawCanvas {
+    position: absolute;
+    top: 0; left: 0;
+    width: 100vw; height: 100vh;
+    touch-action: none;
+  }
+  #gameCanvas {
+    z-index: 0;
+    background: #111;
+  }
+  #resultCanvas {
+    z-index: 1;
+    pointer-events: none;
+  }
+  #drawCanvas {
+    z-index: 2;
+    background: transparent;
+  }
+</style>
+</head>
+<body>
+
+<canvas id="gameCanvas"></canvas>
+<canvas id="resultCanvas"></canvas>
+<canvas id="drawCanvas"></canvas>
+
+<!-- PIXI.js CDN -->
+<script src="https://cdn.jsdelivr.net/npm/pixi.js@7.x/dist/pixi.min.js"></script>
+
+<script>
+// Setup canvases
+const gameCanvas = document.getElementById('gameCanvas');
+const resultCanvas = document.getElementById('resultCanvas');
+const drawCanvas = document.getElementById('drawCanvas');
+
+const resultCtx = resultCanvas.getContext('2d');
+const drawCtx = drawCanvas.getContext('2d');
+
+function resize() {
+  for (const c of [gameCanvas, resultCanvas, drawCanvas]) {
+    c.width = window.innerWidth;
+    c.height = window.innerHeight;
+  }
+  clearDraw();
+  drawResult("Draw a shape");
+  if (app) {
+    app.renderer.resize(window.innerWidth, window.innerHeight);
+  }
+}
+window.addEventListener('resize', resize);
+
+// ===== PIXI.js Setup =====
+const app = new PIXI.Application({
+  view: gameCanvas,
+  width: window.innerWidth,
+  height: window.innerHeight,
+  backgroundColor: 0x111111,
+  resolution: window.devicePixelRatio || 1,
+  autoDensity: true,
+});
+
+// Create a container for the character
+const charContainer = new PIXI.Container();
+app.stage.addChild(charContainer);
+
+const frameUrls = [
+  'assets/bunny.png',
+  'assets/bunny.png',
+  'assets/bunny.png',
+  'assets/bunny.png'
+];
+
+// Placeholder idle texture (first frame)
+let idleTexture = PIXI.Texture.from(frameUrls[0]);
+let runningTextures = frameUrls.map(url => PIXI.Texture.from(url));
+
+let character = new PIXI.AnimatedSprite(runningTextures);
+character.animationSpeed = 0.15;
+character.loop = true;
+character.visible = false;
+character.anchor.set(0.5, 0.5);
+character.x = app.renderer.width / 2;
+character.y = app.renderer.height / 2;
+charContainer.addChild(character);
+
+function playIdle() {
+  character.stop();
+  character.gotoAndStop(0);
+  character.visible = true;
+}
+
+function playRun() {
+  character.textures = runningTextures;
+  character.loop = true;
+  character.animationSpeed = 0.15;
+  character.play();
+  character.visible = true;
+}
+
+playIdle(); // Start idle
+
+// ===== Recognizer and utils (same as before) =====
+
+class Point {
+  constructor(x, y) { this.x = x; this.y = y; }
+}
+
+class Gesture {
+  constructor(name, points) {
+    this.name = name;
+    this.points = resample(points, 64);
+    this.points = rotateToZero(this.points);
+    this.points = scaleToSquare(this.points, 250);
+    this.points = translateToOrigin(this.points);
+  }
+}
+
+class Recognizer {
+  constructor() {
+    this.templates = [];
+  }
+  addTemplate(name, points) {
+    this.templates.push(new Gesture(name, points));
+  }
+  recognize(points) {
+    points = resample(points, 64);
+    points = rotateToZero(points);
+    points = scaleToSquare(points, 250);
+    points = translateToOrigin(points);
+
+    let b = +Infinity;
+    let bestTemplate = null;
+
+    for (let template of this.templates) {
+      let d = distanceAtBestAngle(points, template.points, -Math.PI/4, Math.PI/4, Math.PI/90);
+      if (d < b) {
+        b = d;
+        bestTemplate = template;
+      }
+    }
+
+    let score = 1 - b / (0.5 * Math.sqrt(250*250 + 250*250));
+
+    if (bestTemplate && score > 0.7) {
+      return { name: bestTemplate.name, score: score.toFixed(2) };
+    }
+    return { name: "No match", score: 0 };
+  }
+}
+
+function resample(points, n) {
+  let I = pathLength(points) / (n - 1);
+  let D = 0.0;
+  let newPoints = [points[0]];
+  let pts = points.slice();
+  for (let i = 1; i < pts.length; i++) {
+    let d = distance(pts[i - 1], pts[i]);
+    if ((D + d) >= I) {
+      let qx = pts[i - 1].x + ((I - D) / d) * (pts[i].x - pts[i - 1].x);
+      let qy = pts[i - 1].y + ((I - D) / d) * (pts[i].y - pts[i - 1].y);
+      let q = new Point(qx, qy);
+      newPoints.push(q);
+      pts.splice(i, 0, q);
+      D = 0;
+    } else {
+      D += d;
+    }
+  }
+  if (newPoints.length === n - 1) newPoints.push(pts[pts.length - 1]);
+  return newPoints;
+}
+
+function pathLength(points) {
+  let d = 0;
+  for (let i = 1; i < points.length; i++) {
+    d += distance(points[i - 1], points[i]);
+  }
+  return d;
+}
+
+function distance(p1, p2) {
+  let dx = p2.x - p1.x;
+  let dy = p2.y - p1.y;
+  return Math.sqrt(dx*dx + dy*dy);
+}
+
+function centroid(points) {
+  let x = 0, y = 0;
+  for (let p of points) {
+    x += p.x; y += p.y;
+  }
+  return new Point(x / points.length, y / points.length);
+}
+
+function rotateToZero(points) {
+  let c = centroid(points);
+  let angle = Math.atan2(points[0].y - c.y, points[0].x - c.x);
+  return rotateBy(points, -angle);
+}
+
+function rotateBy(points, angle) {
+  let c = centroid(points);
+  let newPoints = [];
+  for (let p of points) {
+    let qx = (p.x - c.x) * Math.cos(angle) - (p.y - c.y) * Math.sin(angle) + c.x;
+    let qy = (p.x - c.x) * Math.sin(angle) + (p.y - c.y) * Math.cos(angle) + c.y;
+    newPoints.push(new Point(qx, qy));
+  }
+  return newPoints;
+}
+
+function boundingBox(points) {
+  let minX = +Infinity, maxX = -Infinity, minY = +Infinity, maxY = -Infinity;
+  for (let p of points) {
+    if (p.x < minX) minX = p.x;
+    if (p.x > maxX) maxX = p.x;
+    if (p.y < minY) minY = p.y;
+    if (p.y > maxY) maxY = p.y;
+  }
+  return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+}
+
+function scaleToSquare(points, size) {
+  let box = boundingBox(points);
+  let newPoints = [];
+  for (let p of points) {
+    let qx = (p.x - box.x) * (size / box.width);
+    let qy = (p.y - box.y) * (size / box.height);
+    newPoints.push(new Point(qx, qy));
+  }
+  return newPoints;
+}
+
+function translateToOrigin(points) {
+  let c = centroid(points);
+  let newPoints = [];
+  for (let p of points) {
+    let qx = p.x - c.x;
+    let qy = p.y - c.y;
+    newPoints.push(new Point(qx, qy));
+  }
+  return newPoints;
+}
+
+function pathDistance(pts1, pts2) {
+  let d = 0;
+  for (let i = 0; i < pts1.length; i++) {
+    d += distance(pts1[i], pts2[i]);
+  }
+  return d / pts1.length;
+}
+
+function distanceAtAngle(points, template, angle) {
+  let newPoints = rotateBy(points, angle);
+  return pathDistance(newPoints, template);
+}
+
+function distanceAtBestAngle(points, template, a, b, threshold) {
+  const phi = 0.5 * (-1 + Math.sqrt(5));
+  let x1 = phi * a + (1 - phi) * b;
+  let f1 = distanceAtAngle(points, template, x1);
+  let x2 = (1 - phi) * a + phi * b;
+  let f2 = distanceAtAngle(points, template, x2);
+
+  while (Math.abs(b - a) > threshold) {
+    if (f1 < f2) {
+      b = x2; x2 = x1; f2 = f1;
+      x1 = phi * a + (1 - phi) * b;
+      f1 = distanceAtAngle(points, template, x1);
+    } else {
+      a = x1; x1 = x2; f1 = f2;
+      x2 = (1 - phi) * a + phi * b;
+      f2 = distanceAtAngle(points, template, x2);
+    }
+  }
+  return Math.min(f1, f2);
+}
+
+// Setup Recognizer and Templates
+const recognizer = new Recognizer();
+
+function makeCircle(cx, cy, r, n) {
+  let pts = [];
+  for (let i = 0; i < n; i++) {
+    let theta = (i / n) * 2 * Math.PI;
+    pts.push(new Point(cx + r * Math.cos(theta), cy + r * Math.sin(theta)));
+  }
+  return pts;
+}
+
+recognizer.addTemplate("Line", [new Point(20, 200), new Point(380, 200)]);
+recognizer.addTemplate("Circle", makeCircle(200, 200, 180, 64));
+recognizer.addTemplate("Triangle", [new Point(200, 30), new Point(40, 370), new Point(360, 370), new Point(200, 30)]);
+recognizer.addTemplate("Check", [new Point(40, 300), new Point(140, 380), new Point(360, 120)]);
+recognizer.addTemplate("Caret", [new Point(40, 350), new Point(200, 150), new Point(360, 350)]);
+
+// ===== Drawing and Recognizing =====
+
+let drawing = false;
+let points = [];
+
+function clearDraw() {
+  drawCtx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
+}
+
+function drawResult(text) {
+  resultCtx.clearRect(0, 0, resultCanvas.width, resultCanvas.height);
+  resultCtx.font = '48px Arial';
+  resultCtx.fillStyle = 'rgba(255,255,255,0.9)';
+  resultCtx.textAlign = 'center';
+  resultCtx.fillText(text, resultCanvas.width/2, 100);
+}
+
+// Pointer events on drawCanvas (top layer)
+drawCanvas.addEventListener('pointerdown', (e) => {
+  drawing = true;
+  points = [];
+  clearDraw();
+  playRun();   // start running animation
+  const rect = drawCanvas.getBoundingClientRect();
+  points.push(new Point(e.clientX - rect.left, e.clientY - rect.top));
+  drawCtx.beginPath();
+  drawCtx.moveTo(points[0].x, points[0].y);
+});
+
+drawCanvas.addEventListener('pointermove', (e) => {
+  if (!drawing) return;
+  const rect = drawCanvas.getBoundingClientRect();
+  const pt = new Point(e.clientX - rect.left, e.clientY - rect.top);
+  points.push(pt);
+  drawCtx.lineTo(pt.x, pt.y);
+  drawCtx.strokeStyle = 'white';
+  drawCtx.lineWidth = 4;
+  drawCtx.lineCap = 'round';
+  drawCtx.lineJoin = 'round';
+  drawCtx.stroke();
+});
+
+drawCanvas.addEventListener('pointerup', (e) => {
+  if (!drawing) return;
+  drawing = false;
+  drawCtx.closePath();
+
+  playIdle(); // back to idle animation
+
+  if (points.length < 10) {
+    drawResult("Draw a larger shape!");
+    return;
+  }
+
+  let res = recognizer.recognize(points);
+  drawResult(`Recognized: ${res.name} (score: ${res.score})`);
+});
+
+drawCanvas.addEventListener('pointercancel', () => {
+  drawing = false;
+  clearDraw();
+  playIdle();
+  drawResult("Draw a shape");
+});
+
+// Initialize
+resize();
+drawResult("Draw a shape");
+
+</script>
+
+</body>
+</html>
